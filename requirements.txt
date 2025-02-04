@@ -8,3 +8,4 @@ pillow
 pydub
 setuptools
 tqdm
+ffmpeg-python

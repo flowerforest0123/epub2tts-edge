@@ -1,11 +1,22 @@
 import asyncio
+import hashlib
 import io
+import os
 import re
 
 import edge_tts
 from nltk import sent_tokenize
 from pydub import AudioSegment
-from tqdm import tqdm
+from tqdm.asyncio import tqdm
+
+MAX_WORDS_FOR_TTS = 50
+
+cache_folder_path = "./cache"
+
+
+def check_cache_file_exists_and_is_not_empty(filename):
+    return (os.path.exists(os.path.join(cache_folder_path, filename))
+            and os.path.getsize(os.path.join(cache_folder_path, filename)) > 0)
 
 
 class Sentence:
@@ -26,7 +37,7 @@ class Sentence:
                 await asyncio.sleep(3)
 
         print(f"Giving up on sentence '{self.text}' after 3 attempts.")
-        self.audio = None  # Damit `sum()` später keinen Fehler wirft
+        self.audio = None
 
     async def stream_tts(self):
         communicate = edge_tts.Communicate(self.text, self.speaker)
@@ -42,6 +53,9 @@ class Sentence:
 
         stream.seek(0)  # Reset pointer to the beginning
         self.audio = AudioSegment.from_file(stream, format="mp3")
+
+    def clean_up(self):
+        self.audio = None
 
 
 def fix_sentence_text(text):
@@ -59,13 +73,31 @@ class Paragraph:
         self.sentences = sentences if sentences is not None else []
         self.audio = audio
         self.chapter = chapter
+        self.filename = self.generate_filename()
+
+    def generate_filename(self):
+        gen_hash = hashlib.sha256(self.text.encode()).hexdigest()
+        return f'{gen_hash}.flac'
 
     def break_text_into_sentences(self):
         if self.sentences:
             return
-        self.sentences = [Sentence(fix_sentence_text(s), self) for s in sent_tokenize(self.text)]
+        strings = sent_tokenize(self.text)
+        last_index = 0
+        for i in range(len(strings)):
+            combined = ' '.join(strings[last_index:i + 1])
+            if len(combined.split()) > MAX_WORDS_FOR_TTS:
+                self.sentences.append(Sentence(fix_sentence_text(combined), self))
+                last_index = i
+        if last_index < len(strings):
+            combined = ' '.join(strings[last_index:])
+            self.sentences.append(Sentence(fix_sentence_text(combined), self))
 
     async def process_text_to_audio(self):
+        if check_cache_file_exists_and_is_not_empty(self.filename):
+            self.audio = AudioSegment.from_file(os.path.join(cache_folder_path, self.filename))
+            return
+
         if not self.sentences:
             self.break_text_into_sentences()
 
@@ -87,9 +119,20 @@ class Paragraph:
                 self.audio += s.audio
                 first = False
 
+        self.audio.export(os.path.join(cache_folder_path, self.filename), format='flac')
+
+    def clean_up(self):
+        for s in self.sentences:
+            s.clean_up()
+        self.audio = None
+        if check_cache_file_exists_and_is_not_empty(self.filename):
+            os.remove(os.path.join(cache_folder_path, self.filename))
+
+
 class Chapter:
 
-    def __init__(self, paragraphs_as_text, speaker, title = None, paragraph_silence_length=0, sentence_silence_length=0, paragraphs=None, audio=None):
+    def __init__(self, paragraphs_as_text, speaker, title=None, paragraph_silence_length=0, sentence_silence_length=0,
+                 paragraphs=None, audio=None):
         self.paragraphs_as_text = paragraphs_as_text
         self.speaker = speaker
         self.title = title
@@ -97,6 +140,17 @@ class Chapter:
         self.sentence_silence_length = sentence_silence_length
         self.paragraphs = paragraphs if paragraphs is not None else []
         self.audio = audio
+        self.filename = self.generate_filename()
+
+    def generate_filename(self):
+        if len(self.paragraphs_as_text) > 0:
+            gen_hash = hashlib.sha256("".join(self.paragraphs_as_text).encode()).hexdigest()
+            return f'{gen_hash}.flac'
+        else:
+            if self.title is not None:
+                gen_hash = hashlib.sha256(self.title.encode()).hexdigest()
+                return f'{gen_hash}.flac'
+        return None
 
     def break_text_into_paragraphs(self):
         if self.paragraphs:
@@ -104,9 +158,13 @@ class Chapter:
         if self.title is not None and self.title not in ['Title', 'blank']:
             self.paragraphs.append(Paragraph(self.title, self, self.sentence_silence_length))
         for paragraph_as_text in self.paragraphs_as_text:
-            self.paragraphs.append(Paragraph(paragraph_as_text, self, self.sentence_silence_length))
+            if paragraph_as_text:
+                self.paragraphs.append(Paragraph(paragraph_as_text, self, self.sentence_silence_length))
 
     async def process_text_to_audio(self):
+        if check_cache_file_exists_and_is_not_empty(self.filename):
+            self.audio = AudioSegment.from_file(os.path.join(cache_folder_path, self.filename))
+            return
         if not self.paragraphs:
             self.break_text_into_paragraphs()
 
@@ -116,7 +174,8 @@ class Chapter:
             async with semaphore:
                 await paragraph.process_text_to_audio()
 
-        await asyncio.gather(*(process_paragraph(p) for _, p in enumerate(tqdm(self.paragraphs, desc= f'Process Chapter: {self.title}', unit='pg'))))
+        tasks = [process_paragraph(p) for p in self.paragraphs]
+        await tqdm.gather(*tasks, desc=f'Process Chapter: {self.title}', unit='pg')
 
         self.audio = AudioSegment.empty()
 
@@ -126,4 +185,16 @@ class Chapter:
                 if not first:
                     self.audio += self.paragraph_silence
                 self.audio += p.audio
+                p.clean_up()
                 first = False
+        self.audio.export(os.path.join(cache_folder_path, self.filename), format='flac')
+
+    def clean_up(self):
+        for p in self.paragraphs:
+            p.clean_up()
+        self.audio = None
+        if check_cache_file_exists_and_is_not_empty(self.filename):
+            os.remove(os.path.join(cache_folder_path, self.filename))
+
+    def get_file_path(self):
+        return os.path.join(cache_folder_path, self.filename)

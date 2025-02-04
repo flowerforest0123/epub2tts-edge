@@ -8,6 +8,8 @@ import subprocess
 import time
 import warnings
 import sys
+
+import ffmpeg
 from tqdm import tqdm
 from line_profiler_pycharm import profile
 
@@ -169,7 +171,6 @@ def get_book(sourcefile):
     book_contents = []
     book_title = sourcefile
     book_author = "Unknown"
-    chapter_titles = []
 
     with open(sourcefile, "r", encoding="utf-8") as file:
         current_chapter = {"title": "blank", "paragraphs": []}
@@ -195,13 +196,10 @@ def get_book(sourcefile):
                 chapter_title = line[1:].strip()
                 if any(c.isalnum() for c in chapter_title):
                     current_chapter["title"] = chapter_title
-                    chapter_titles.append(current_chapter["title"])
                 else:
                     current_chapter["title"] = "blank"
-                    chapter_titles.append("blank")
             elif line:
                 if not initialized_first_chapter:
-                    chapter_titles.append("blank")
                     initialized_first_chapter = True
                 if any(char.isalnum() for char in line):
                     sentences = sent_tokenize(line)
@@ -213,7 +211,7 @@ def get_book(sourcefile):
         if current_chapter["paragraphs"]:
             book_contents.append(current_chapter)
 
-    return book_contents, book_title, book_author, chapter_titles
+    return book_contents, book_title, book_author
 
 def sort_key(s):
     # extract number from the string
@@ -231,77 +229,15 @@ def check_for_file(filename):
 
 @profile
 def read_book(book_contents, speaker, paragraphpause, sentencepause):
-    segments = []
-    title_silent = AudioSegment.silent(1200)
-    silent = AudioSegment.silent(paragraphpause)
-    # Do not read these into the audio file:
-    title_names_to_skip_reading = ['Title', 'blank']
+    chapters = []
 
     for i, chapter in enumerate(tqdm(book_contents, desc=f"Generating audio files: ",unit='pg')):
         chapter_object = audio_reading.Chapter(chapter["paragraphs"], speaker, chapter["title"], paragraphpause, sentencepause)
         asyncio.run(chapter_object.process_text_to_audio())
-        partname = f"part{i}.flac"
-        chapter_object.audio.export(partname, format="flac")
-        segments.append(partname)
-        '''
-        files = []
-        partname = f"part{i}.flac"
-        print(f"\n\n")
+        chapters.append(chapter_object)
+    return chapters
 
-        if os.path.isfile(partname):
-            print(f"{partname} exists, skipping to next chapter")
-            segments.append(partname)
-        else:
-            if chapter["title"] in title_names_to_skip_reading:
-                print(f"Chapter name: \"{chapter['title']}\"  -  Note: The word \"{chapter['title']}\" will not be read into audio file.")
-            else:
-                print(f"Chapter name: \"{chapter['title']}\"")
-
-            audio_stream_parts = []
-
-            if chapter["title"] == "":
-                chapter["title"] = "blank"
-            if chapter["title"] not in title_names_to_skip_reading:
-                title_audio = asyncio.run(
-                    parallel_edgespeak([chapter["title"]], [speaker])
-                )
-                if len(title_audio)>0:
-                    audio_stream_parts.append(title_silent)
-                    audio_stream_parts.append(AudioSegment.from_mp3(title_audio[0]))
-
-            for pindex, paragraph in enumerate(
-                tqdm(chapter["paragraphs"], desc=f"Generating audio files: ",unit='pg')
-            ):
-                ptemp = f"pgraphs{pindex}.flac"
-                if os.path.isfile(ptemp):
-                    print(f"{ptemp} exists, skipping to next paragraph")
-                else:
-                    sentences = sent_tokenize(paragraph)
-                    speakers = [speaker] * len(sentences)
-                    audio_sentences = asyncio.run(parallel_edgespeak(sentences, speakers))
-                    for audio_sentence in audio_sentences:
-                        audio_stream_parts.append(silent)
-                        audio_stream_parts.append(AudioSegment.from_mp3(audio_sentence))
-                merge_sentences_into_paragraph(audio_stream_parts, ptemp)
-                files.append(ptemp)
-            # combine paragraphs into chapter
-            append_silence(files[-1], 2000)
-            combined = AudioSegment.empty()
-            for file in files:
-                print(f'File {file}')
-                combined += AudioSegment.from_file(file)
-            combined.export(partname, format="flac")
-            for file in files:
-                os.remove(file)
-            segments.append(partname)
-            '''
-    return segments
-
-def merge_sentences_into_paragraph(sentences, filename):
-    sum(sentences, AudioSegment.empty()).export(filename, format="flac")
-
-def generate_metadata(files, author, title, chapter_titles):
-    chap = 0
+def generate_metadata(chapters, author, title):
     start_time = 0
     with open("FFMETADATAFILE", "w") as file:
         file.write(";FFMETADATA1\n")
@@ -309,48 +245,26 @@ def generate_metadata(files, author, title, chapter_titles):
         file.write(f"ALBUM={title}\n")
         file.write(f"TITLE={title}\n")
         file.write("DESCRIPTION=Made with https://github.com/aedocw/epub2tts-edge\n")
-        for file_name in files:
-            duration = get_duration(file_name)
+        for chapter in chapters:
+            duration = len(chapter.audio)
             file.write("[CHAPTER]\n")
             file.write("TIMEBASE=1/1000\n")
             file.write(f"START={start_time}\n")
             file.write(f"END={start_time + duration}\n")
-            file.write(f"title={chapter_titles[chap]}\n")
-            chap += 1
+            file.write(f"title={chapter.title}\n")
             start_time += duration
 
-def get_duration(file_path):
-    audio = AudioSegment.from_file(file_path)
-    duration_milliseconds = len(audio)
-    return duration_milliseconds
-
-
-def make_m4b(files, sourcefile, speaker):
+def make_m4b(chapters, sourcefile, speaker):
     filelist = "filelist.txt"
     basefile = sourcefile.replace(".txt", "")
     outputm4a = f"{basefile} ({speaker}).m4a"
     outputm4b = f"{basefile} ({speaker}).m4b"
     with open(filelist, "w") as f:
-        for filename in files:
-            filename = filename.replace("'", "'\\''")
+        for chapter in chapters:
+            file_path = chapter.get_file_path()
+            filename = file_path.replace("'", "'\\''")
             f.write(f"file '{filename}'\n")
-    ffmpeg_command = [
-        "ffmpeg",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        filelist,
-        "-codec:a",
-        "flac",
-        "-f",
-        "mp4",
-        "-strict",
-        "-2",
-        outputm4a,
-    ]
-    subprocess.run(ffmpeg_command)
+    ffmpeg.input(filelist, format='concat', safe=0).output(outputm4a, codec='flac', f='mp4', strict='-2').run()
     ffmpeg_command = [
         "ffmpeg",
         "-i",
@@ -367,8 +281,8 @@ def make_m4b(files, sourcefile, speaker):
     os.remove(filelist)
     os.remove("FFMETADATAFILE")
     os.remove(outputm4a)
-    for f in files:
-        os.remove(f)
+    for c in chapters:
+        c.clean_up()
     return outputm4b
 
 def add_cover(cover_img, filename):
@@ -427,10 +341,10 @@ def main():
         export(book, args.sourcefile)
         exit()
 
-    book_contents, book_title, book_author, chapter_titles = get_book(args.sourcefile)
-    files = read_book(book_contents, args.speaker, args.paragraphpause, args.sentencepause)
-    generate_metadata(files, book_author, book_title, chapter_titles)
-    m4bfilename = make_m4b(files, args.sourcefile, args.speaker)
+    book_contents, book_title, book_author = get_book(args.sourcefile)
+    chapters = read_book(book_contents, args.speaker, args.paragraphpause, args.sentencepause)
+    generate_metadata(chapters, book_author, book_title)
+    m4bfilename = make_m4b(chapters, args.sourcefile, args.speaker)
     add_cover(args.cover, m4bfilename)
 
 
