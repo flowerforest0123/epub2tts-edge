@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import concurrent.futures
+import io
 import os
 import re
 import subprocess
@@ -8,7 +9,7 @@ import time
 import warnings
 import sys
 from tqdm import tqdm
-
+from line_profiler_pycharm import profile
 
 from bs4 import BeautifulSoup
 import ebooklib
@@ -22,6 +23,7 @@ from PIL import Image
 from pydub import AudioSegment
 import zipfile
 
+import audio_reading
 
 namespaces = {
    "calibre":"http://calibre.kovidgoyal.net/2009/metadata",
@@ -227,21 +229,21 @@ def check_for_file(filename):
         else:
             os.remove(filename)
 
-def append_silence(tempfile, duration=1200):
-    audio = AudioSegment.from_file(tempfile)
-    # Create a silence segment
-    silence = AudioSegment.silent(duration)
-    # Append the silence segment to the audio
-    combined = audio + silence
-    # Save the combined audio back to file
-    combined.export(tempfile, format="flac")
-
+@profile
 def read_book(book_contents, speaker, paragraphpause, sentencepause):
     segments = []
+    title_silent = AudioSegment.silent(1200)
+    silent = AudioSegment.silent(paragraphpause)
     # Do not read these into the audio file:
     title_names_to_skip_reading = ['Title', 'blank']
 
-    for i, chapter in enumerate(book_contents, start=1):
+    for i, chapter in enumerate(tqdm(book_contents, desc=f"Generating audio files: ",unit='pg')):
+        chapter_object = audio_reading.Chapter(chapter["paragraphs"], speaker, chapter["title"], paragraphpause, sentencepause)
+        asyncio.run(chapter_object.process_text_to_audio())
+        partname = f"part{i}.flac"
+        chapter_object.audio.export(partname, format="flac")
+        segments.append(partname)
+        '''
         files = []
         partname = f"part{i}.flac"
         print(f"\n\n")
@@ -255,13 +257,17 @@ def read_book(book_contents, speaker, paragraphpause, sentencepause):
             else:
                 print(f"Chapter name: \"{chapter['title']}\"")
 
+            audio_stream_parts = []
+
             if chapter["title"] == "":
                 chapter["title"] = "blank"
             if chapter["title"] not in title_names_to_skip_reading:
-                asyncio.run(
-                    parallel_edgespeak([chapter["title"]], [speaker], ["sntnc0.mp3"])
+                title_audio = asyncio.run(
+                    parallel_edgespeak([chapter["title"]], [speaker])
                 )
-                append_silence("sntnc0.mp3", 1200)
+                if len(title_audio)>0:
+                    audio_stream_parts.append(title_silent)
+                    audio_stream_parts.append(AudioSegment.from_mp3(title_audio[0]))
 
             for pindex, paragraph in enumerate(
                 tqdm(chapter["paragraphs"], desc=f"Generating audio files: ",unit='pg')
@@ -271,33 +277,28 @@ def read_book(book_contents, speaker, paragraphpause, sentencepause):
                     print(f"{ptemp} exists, skipping to next paragraph")
                 else:
                     sentences = sent_tokenize(paragraph)
-                    filenames = [
-                        "sntnc" + str(z + 1) + ".mp3" for z in range(len(sentences))
-                    ]
                     speakers = [speaker] * len(sentences)
-                    asyncio.run(parallel_edgespeak(sentences, speakers, filenames))
-                    append_silence(filenames[-1], paragraphpause)
-                    # combine sentences in paragraph
-                    sorted_files = sorted(filenames, key=sort_key)
-                    if os.path.exists("sntnc0.mp3"):
-                        sorted_files.insert(0, "sntnc0.mp3")
-                    combined = AudioSegment.empty()
-                    for file in sorted_files:
-                        combined += AudioSegment.from_file(file)
-                    combined.export(ptemp, format="flac")
-                    for file in sorted_files:
-                        os.remove(file)
+                    audio_sentences = asyncio.run(parallel_edgespeak(sentences, speakers))
+                    for audio_sentence in audio_sentences:
+                        audio_stream_parts.append(silent)
+                        audio_stream_parts.append(AudioSegment.from_mp3(audio_sentence))
+                merge_sentences_into_paragraph(audio_stream_parts, ptemp)
                 files.append(ptemp)
             # combine paragraphs into chapter
             append_silence(files[-1], 2000)
             combined = AudioSegment.empty()
             for file in files:
+                print(f'File {file}')
                 combined += AudioSegment.from_file(file)
             combined.export(partname, format="flac")
             for file in files:
                 os.remove(file)
             segments.append(partname)
+            '''
     return segments
+
+def merge_sentences_into_paragraph(sentences, filename):
+    sum(sentences, AudioSegment.empty()).export(filename, format="flac")
 
 def generate_metadata(files, author, title, chapter_titles):
     chap = 0
@@ -322,6 +323,7 @@ def get_duration(file_path):
     audio = AudioSegment.from_file(file_path)
     duration_milliseconds = len(audio)
     return duration_milliseconds
+
 
 def make_m4b(files, sourcefile, speaker):
     filelist = "filelist.txt"
@@ -381,40 +383,6 @@ def add_cover(cover_img, filename):
     except:
         print(f"Cover image {cover_img} not found")
 
-def run_edgespeak(sentence, speaker, filename):
-    for speakattempt in range(3):
-        try:
-            communicate = edge_tts.Communicate(sentence, speaker)
-            run_save(communicate, filename)
-            if os.path.getsize(filename) == 0:
-                raise Exception("Failed to save file from edge_tts") from e
-            break
-        except Exception as e:
-            print(f"Attempt {speakattempt+1}/3 failed with '{sentence}' in run_edgespeak with error: {e}")
-            # wait a few seconds in case its a transient network issue
-            time.sleep(3)
-    else:
-        print(f"Giving up on sentence '{sentence}' after 3 attempts in run_edgespeak.")
-        exit()
-
-def run_save(communicate, filename):
-    asyncio.run(communicate.save(filename))
-
-async def parallel_edgespeak(sentences, speakers, filenames):
-    semaphore = asyncio.Semaphore(10)  # Limit the number of concurrent tasks
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        tasks = []
-        for sentence, speaker, filename in zip(sentences, speakers, filenames):
-            async with semaphore:
-                loop = asyncio.get_running_loop()
-                sentence = re.sub(r'[!]+', '!', sentence)
-                sentence = re.sub(r'[?]+', '?', sentence)
-                task = loop.run_in_executor(executor, run_edgespeak, sentence, speaker, filename)
-                tasks.append(task)
-        await asyncio.gather(*tasks)
-
-
 def main():
     parser = argparse.ArgumentParser(
         prog="epub2tts-edge",
@@ -468,3 +436,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
