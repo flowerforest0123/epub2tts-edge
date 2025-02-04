@@ -82,16 +82,7 @@ class Paragraph:
     def break_text_into_sentences(self):
         if self.sentences:
             return
-        strings = sent_tokenize(self.text)
-        last_index = 0
-        for i in range(len(strings)):
-            combined = ' '.join(strings[last_index:i + 1])
-            if len(combined.split()) > MAX_WORDS_FOR_TTS:
-                self.sentences.append(Sentence(fix_sentence_text(combined), self))
-                last_index = i
-        if last_index < len(strings):
-            combined = ' '.join(strings[last_index:])
-            self.sentences.append(Sentence(fix_sentence_text(combined), self))
+        self.sentences = [Sentence(fix_sentence_text(s), self) for s in sent_tokenize(self.text)]
 
     async def process_text_to_audio(self):
         if check_cache_file_exists_and_is_not_empty(self.filename):
@@ -131,10 +122,11 @@ class Paragraph:
 
 class Chapter:
 
-    def __init__(self, paragraphs_as_text, speaker, title=None, paragraph_silence_length=0, sentence_silence_length=0,
+    def __init__(self, paragraphs_as_text, book, title=None, paragraph_silence_length=0, sentence_silence_length=0,
                  paragraphs=None, audio=None):
         self.paragraphs_as_text = paragraphs_as_text
-        self.speaker = speaker
+        self.book = book
+        self.speaker = book.speaker
         self.title = title
         self.paragraph_silence = AudioSegment.silent(paragraph_silence_length)
         self.sentence_silence_length = sentence_silence_length
@@ -198,3 +190,54 @@ class Chapter:
 
     def get_file_path(self):
         return os.path.join(cache_folder_path, self.filename)
+
+
+class Book:
+
+    def __init__(self, filename_text, speaker, paragraph_silence_length=0, sentence_silence_length=0):
+        self.filename_text = filename_text
+        self.author = "Unknown"
+        self.title = self.filename_text
+        self.chapters = []
+        self.paragraph_silence_length = paragraph_silence_length
+        self.sentence_silence_length = sentence_silence_length
+        self.speaker = speaker
+
+    def read_text_into_chapters(self):
+        with open(self.filename_text, "r", encoding="utf-8") as file:
+            current_chapter = None
+            i = 0
+            for line in file:
+                if i < 2:
+                    i += 1
+                    if line.startswith('Title: '):
+                        self.title = line.replace('Title: ', '').strip()
+                    elif line.startswith('Author: '):
+                        self.author = line.replace('Author: ', '').strip()
+                    continue
+
+                line_striped = line.strip()
+                if line_striped == "":
+                    continue
+                if line_striped.startswith("#"):
+                    if current_chapter and current_chapter.paragraphs:
+                        self.chapters.append(current_chapter)
+                    title = line[1:].strip() if any(c.isalnum() for c in line_striped) else "blank"
+                    current_chapter = Chapter([], self, title=title,
+                                              paragraph_silence_length=self.paragraph_silence_length,
+                                              sentence_silence_length=self.sentence_silence_length)
+                elif any(c.isalnum() for c in line_striped):
+                    sentences = [Sentence(fix_sentence_text(s), self) for s in sent_tokenize(self.text) if
+                                 any(char.isalnum() for char in s)]
+                    new_paragraph = Paragraph(" ".join([s.text for s in sentences]), current_chapter,
+                                              sentences=sentences, sentence_silence_length=self.sentence_silence_length)
+                    current_chapter.paragraphs.append(new_paragraph)
+            if current_chapter.paragraphs:
+                self.chapters.append(current_chapter)
+
+    def process_chapters(self):
+        [asyncio.run(c.process_text_to_audio) for c in self.chapters]
+
+    def clean_up(self):
+        for chapter in self.chapters:
+            chapter.clean_up()

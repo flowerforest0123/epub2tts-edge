@@ -1,29 +1,20 @@
 import argparse
-import asyncio
-import concurrent.futures
-import io
 import os
 import re
 import subprocess
-import time
-import warnings
 import sys
+import warnings
+import zipfile
 
-import ffmpeg
-from tqdm import tqdm
-from line_profiler_pycharm import profile
-
-from bs4 import BeautifulSoup
 import ebooklib
+import ffmpeg
+import nltk
+from PIL import Image
+from bs4 import BeautifulSoup
 from ebooklib import epub
-import edge_tts
 from lxml import etree
 from mutagen import mp4
-import nltk
 from nltk.tokenize import sent_tokenize
-from PIL import Image
-from pydub import AudioSegment
-import zipfile
 
 import audio_reading
 
@@ -167,56 +158,6 @@ def export(book, sourcefile):
                     clean = re.sub(r'[‘’]', "'", clean)  # Curly single quotes to standard single quotes
                     file.write(f"{clean}\n\n")
 
-def get_book(sourcefile):
-    book_contents = []
-    book_title = sourcefile
-    book_author = "Unknown"
-
-    with open(sourcefile, "r", encoding="utf-8") as file:
-        current_chapter = {"title": "blank", "paragraphs": []}
-        initialized_first_chapter = False
-        lines_skipped = 0
-        for line in file:
-
-            if lines_skipped < 2 and (line.startswith("Title") or line.startswith("Author")):
-                lines_skipped += 1
-                if line.startswith('Title: '):
-                    book_title = line.replace('Title: ', '').strip()
-                elif line.startswith('Author: '):
-                    book_author = line.replace('Author: ', '').strip()
-                continue
-
-            line = line.strip()
-            if line.startswith("#"):
-                if current_chapter["paragraphs"] or not initialized_first_chapter:
-                    if initialized_first_chapter:
-                        book_contents.append(current_chapter)
-                    current_chapter = {"title": None, "paragraphs": []}
-                    initialized_first_chapter = True
-                chapter_title = line[1:].strip()
-                if any(c.isalnum() for c in chapter_title):
-                    current_chapter["title"] = chapter_title
-                else:
-                    current_chapter["title"] = "blank"
-            elif line:
-                if not initialized_first_chapter:
-                    initialized_first_chapter = True
-                if any(char.isalnum() for char in line):
-                    sentences = sent_tokenize(line)
-                    cleaned_sentences = [s for s in sentences if any(char.isalnum() for char in s)]
-                    line = ' '.join(cleaned_sentences)
-                    current_chapter["paragraphs"].append(line)
-
-        # Append the last chapter if it contains any paragraphs.
-        if current_chapter["paragraphs"]:
-            book_contents.append(current_chapter)
-
-    return book_contents, book_title, book_author
-
-def sort_key(s):
-    # extract number from the string
-    return int(re.findall(r'\d+', s)[0])
-
 def check_for_file(filename):
     if os.path.isfile(filename):
         print(f"The file '{filename}' already exists.")
@@ -227,25 +168,15 @@ def check_for_file(filename):
         else:
             os.remove(filename)
 
-@profile
-def read_book(book_contents, speaker, paragraphpause, sentencepause):
-    chapters = []
-
-    for i, chapter in enumerate(tqdm(book_contents, desc=f"Generating audio files: ",unit='pg')):
-        chapter_object = audio_reading.Chapter(chapter["paragraphs"], speaker, chapter["title"], paragraphpause, sentencepause)
-        asyncio.run(chapter_object.process_text_to_audio())
-        chapters.append(chapter_object)
-    return chapters
-
-def generate_metadata(chapters, author, title):
+def generate_metadata(book):
     start_time = 0
     with open("FFMETADATAFILE", "w") as file:
         file.write(";FFMETADATA1\n")
-        file.write(f"ARTIST={author}\n")
-        file.write(f"ALBUM={title}\n")
-        file.write(f"TITLE={title}\n")
+        file.write(f"ARTIST={book.author}\n")
+        file.write(f"ALBUM={book.title}\n")
+        file.write(f"TITLE={book.title}\n")
         file.write("DESCRIPTION=Made with https://github.com/aedocw/epub2tts-edge\n")
-        for chapter in chapters:
+        for chapter in book.chapters:
             duration = len(chapter.audio)
             file.write("[CHAPTER]\n")
             file.write("TIMEBASE=1/1000\n")
@@ -254,13 +185,13 @@ def generate_metadata(chapters, author, title):
             file.write(f"title={chapter.title}\n")
             start_time += duration
 
-def make_m4b(chapters, sourcefile, speaker):
+def make_m4b(book):
     filelist = "filelist.txt"
-    basefile = sourcefile.replace(".txt", "")
-    outputm4a = f"{basefile} ({speaker}).m4a"
-    outputm4b = f"{basefile} ({speaker}).m4b"
+    basefile = book.filename_text.replace(".txt", "")
+    outputm4a = f"{basefile} ({book.speaker}).m4a"
+    outputm4b = f"{basefile} ({book.speaker}).m4b"
     with open(filelist, "w") as f:
-        for chapter in chapters:
+        for chapter in book.chapters:
             file_path = chapter.get_file_path()
             filename = file_path.replace("'", "'\\''")
             f.write(f"file '{filename}'\n")
@@ -281,8 +212,7 @@ def make_m4b(chapters, sourcefile, speaker):
     os.remove(filelist)
     os.remove("FFMETADATAFILE")
     os.remove(outputm4a)
-    for c in chapters:
-        c.clean_up()
+    book.clean_up()
     return outputm4b
 
 def add_cover(cover_img, filename):
@@ -341,10 +271,11 @@ def main():
         export(book, args.sourcefile)
         exit()
 
-    book_contents, book_title, book_author = get_book(args.sourcefile)
-    chapters = read_book(book_contents, args.speaker, args.paragraphpause, args.sentencepause)
-    generate_metadata(chapters, book_author, book_title)
-    m4bfilename = make_m4b(chapters, args.sourcefile, args.speaker)
+    book = audio_reading.Book(args.sourcefile, speaker=args.speaker, paragraph_silence_length=args.paragraphpause, sentence_silence_length=args.sentencepause)
+    book.read_text_into_chapters()
+    book.process_chapters()
+    generate_metadata(book)
+    m4bfilename = make_m4b(book)
     add_cover(args.cover, m4bfilename)
 
 
