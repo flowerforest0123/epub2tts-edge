@@ -10,7 +10,10 @@ from nltk import sent_tokenize
 from pydub import AudioSegment
 from tqdm.asyncio import tqdm
 
-MAX_WORDS_FOR_TTS = 50
+AMOUNT_PARALLEL_SENTENCE_TASKS = 10
+AMOUNT_PARALLEL_PARAGRAPH_TASKS = 2
+
+MAX_WORDS_FOR_TTS = 100
 
 cache_folder_path = "./cache"
 
@@ -93,7 +96,7 @@ class Paragraph:
         if not self.sentences:
             self.break_text_into_sentences()
 
-        semaphore = asyncio.Semaphore(10)
+        semaphore = asyncio.Semaphore(AMOUNT_PARALLEL_SENTENCE_TASKS)
 
         async def process_sentence(sentence):
             async with semaphore:
@@ -161,7 +164,7 @@ class Chapter:
         if not self.paragraphs:
             self.break_text_into_paragraphs()
 
-        semaphore = asyncio.Semaphore(2)
+        semaphore = asyncio.Semaphore(AMOUNT_PARALLEL_PARAGRAPH_TASKS)
 
         async def process_paragraph(paragraph):
             async with semaphore:
@@ -191,6 +194,22 @@ class Chapter:
 
     def get_file_path(self):
         return os.path.join(cache_folder_path, self.filename)
+
+
+def build_sentences_from_line(line_striped, new_paragraph):
+    def fun(x):
+        return any(char.isalnum() for char in x)
+
+    strings = list(filter(fun, sent_tokenize(line_striped)))
+    last_index = 0
+    for j in range(len(strings)):
+        combined = ' '.join(strings[last_index:j + 1])
+        if len(combined.split()) > MAX_WORDS_FOR_TTS:
+            new_paragraph.sentences.append(Sentence(fix_sentence_text(combined), new_paragraph))
+            last_index = j
+    if last_index < len(strings):
+        combined = ' '.join(strings[last_index:])
+        new_paragraph.sentences.append(Sentence(fix_sentence_text(combined), new_paragraph))
 
 
 class Book:
@@ -229,10 +248,10 @@ class Book:
                                               paragraph_silence_length=self.paragraph_silence_length,
                                               sentence_silence_length=self.sentence_silence_length)
                 elif any(c.isalnum() for c in line_striped):
-                    sentences = [Sentence(fix_sentence_text(s), self) for s in sent_tokenize(line_striped) if
-                                 any(char.isalnum() for char in s)]
-                    new_paragraph = Paragraph(" ".join([s.text for s in sentences]), current_chapter,
-                                              sentences=sentences, sentence_silence_length=self.sentence_silence_length)
+                    new_paragraph = Paragraph(" ", current_chapter,
+                                              sentence_silence_length=self.sentence_silence_length)
+                    build_sentences_from_line(line_striped, new_paragraph)
+                    new_paragraph.text = " ".join([s.text for s in new_paragraph.sentences])
                     current_chapter.paragraphs.append(new_paragraph)
             if current_chapter.paragraphs:
                 self.chapters.append(current_chapter)
