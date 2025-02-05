@@ -79,6 +79,10 @@ class Paragraph:
         self.chapter = chapter
         self.filename = self.generate_filename()
 
+    def update_text(self, text):
+        self.text = text
+        self.filename = self.generate_filename()
+
     def generate_filename(self):
         gen_hash = hashlib.sha256(self.text.encode()).hexdigest()
         return f'{gen_hash}.flac'
@@ -202,21 +206,19 @@ def build_sentences_from_line(line_striped, new_paragraph):
 
     # Filter out empty sentences
     strings = list(filter(fun, sent_tokenize(line_striped)))
-    last_index = 0
+    if len(strings) == 0:
+        return
 
-    for j in range(1, len(strings) + 1):  # Start from index 1, not 0
-        combined = ' '.join(strings[last_index:j])
+    current_combined = strings[0]
 
-        # If the combined sentence exceeds the word limit for TTS
-        if len(combined.split()) > MAX_WORDS_FOR_TTS:
-            if last_index != j - 1:  # Ensure it's not the same sentence
-                new_paragraph.sentences.append(Sentence(fix_sentence_text(combined), new_paragraph))
-            last_index = j - 1  # Update last_index to reflect the end of the last sentence
+    for i in range(1, len(strings)):
+        if len(current_combined.split()) > MAX_WORDS_FOR_TTS:
+            new_paragraph.sentences.append(Sentence(fix_sentence_text(current_combined), new_paragraph))
+            current_combined = strings[i]
+        else:
+            current_combined = current_combined + " " + strings[i]
 
-    # Handle any remaining text after the loop
-    if last_index < len(strings):
-        combined = ' '.join(strings[last_index:])
-        new_paragraph.sentences.append(Sentence(fix_sentence_text(combined), new_paragraph))
+    new_paragraph.sentences.append(Sentence(fix_sentence_text(current_combined), new_paragraph))
 
 
 class Book:
@@ -258,7 +260,7 @@ class Book:
                     new_paragraph = Paragraph(" ", current_chapter,
                                               sentence_silence_length=self.sentence_silence_length)
                     build_sentences_from_line(line_striped, new_paragraph)
-                    new_paragraph.text = " ".join([s.text for s in new_paragraph.sentences])
+                    new_paragraph.update_text(" ".join([s.text for s in new_paragraph.sentences]))
                     current_chapter.paragraphs.append(new_paragraph)
             if current_chapter.paragraphs:
                 self.chapters.append(current_chapter)
