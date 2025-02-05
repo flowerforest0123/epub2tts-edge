@@ -3,6 +3,7 @@ import hashlib
 import io
 import os
 import re
+from pathlib import Path
 
 import edge_tts
 from nltk import sent_tokenize
@@ -66,7 +67,7 @@ def fix_sentence_text(text):
 
 class Paragraph:
 
-    def __init__(self, text, chapter, sentence_silence_length=0, sentences=None, audio=None):
+    def __init__(self, text, chapter, sentence_silence_length=1200, sentences=None, audio=None):
         self.speaker = chapter.speaker
         self.text = text
         self.sentence_silence = AudioSegment.silent(sentence_silence_length)
@@ -122,7 +123,7 @@ class Paragraph:
 
 class Chapter:
 
-    def __init__(self, paragraphs_as_text, book, title=None, paragraph_silence_length=0, sentence_silence_length=0,
+    def __init__(self, paragraphs_as_text, book, title=None, paragraph_silence_length=1200, sentence_silence_length=1200,
                  paragraphs=None, audio=None):
         self.paragraphs_as_text = paragraphs_as_text
         self.book = book
@@ -194,7 +195,8 @@ class Chapter:
 
 class Book:
 
-    def __init__(self, filename_text, speaker, paragraph_silence_length=0, sentence_silence_length=0):
+    def __init__(self, filename_text, speaker, paragraph_silence_length=1200, sentence_silence_length=1200):
+        Path(cache_folder_path).mkdir(parents=True, exist_ok=True)
         self.filename_text = filename_text
         self.author = "Unknown"
         self.title = self.filename_text
@@ -227,7 +229,7 @@ class Book:
                                               paragraph_silence_length=self.paragraph_silence_length,
                                               sentence_silence_length=self.sentence_silence_length)
                 elif any(c.isalnum() for c in line_striped):
-                    sentences = [Sentence(fix_sentence_text(s), self) for s in sent_tokenize(self.text) if
+                    sentences = [Sentence(fix_sentence_text(s), self) for s in sent_tokenize(line_striped) if
                                  any(char.isalnum() for char in s)]
                     new_paragraph = Paragraph(" ".join([s.text for s in sentences]), current_chapter,
                                               sentences=sentences, sentence_silence_length=self.sentence_silence_length)
@@ -236,7 +238,7 @@ class Book:
                 self.chapters.append(current_chapter)
 
     def process_chapters(self):
-        [asyncio.run(c.process_text_to_audio) for c in self.chapters]
+        [asyncio.run(c.process_text_to_audio()) for c in self.chapters]
 
     def clean_up(self):
         for chapter in self.chapters:
