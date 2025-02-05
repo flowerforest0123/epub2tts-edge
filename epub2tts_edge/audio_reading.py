@@ -200,13 +200,20 @@ def build_sentences_from_line(line_striped, new_paragraph):
     def fun(x):
         return any(char.isalnum() for char in x)
 
+    # Filter out empty sentences
     strings = list(filter(fun, sent_tokenize(line_striped)))
     last_index = 0
-    for j in range(len(strings)):
-        combined = ' '.join(strings[last_index:j + 1])
+
+    for j in range(1, len(strings) + 1):  # Start from index 1, not 0
+        combined = ' '.join(strings[last_index:j])
+
+        # If the combined sentence exceeds the word limit for TTS
         if len(combined.split()) > MAX_WORDS_FOR_TTS:
-            new_paragraph.sentences.append(Sentence(fix_sentence_text(combined), new_paragraph))
-            last_index = j
+            if last_index != j - 1:  # Ensure it's not the same sentence
+                new_paragraph.sentences.append(Sentence(fix_sentence_text(combined), new_paragraph))
+            last_index = j - 1  # Update last_index to reflect the end of the last sentence
+
+    # Handle any remaining text after the loop
     if last_index < len(strings):
         combined = ' '.join(strings[last_index:])
         new_paragraph.sentences.append(Sentence(fix_sentence_text(combined), new_paragraph))
