@@ -10,10 +10,7 @@ from nltk import sent_tokenize
 from pydub import AudioSegment
 from tqdm.asyncio import tqdm
 
-AMOUNT_PARALLEL_SENTENCE_TASKS = 10
-AMOUNT_PARALLEL_PARAGRAPH_TASKS = 2
-
-MAX_WORDS_FOR_TTS = 100
+AMOUNT_PARALLEL_PARAGRAPH_TASKS = 10
 
 cache_folder_path = "./cache"
 
@@ -25,41 +22,9 @@ def check_cache_file_exists_and_is_not_empty(filename):
 
 class Sentence:
 
-    def __init__(self, text, paragraph, audio=None):
+    def __init__(self, text, paragraph):
         self.text = text
         self.paragraph = paragraph
-        self.speaker = paragraph.speaker
-        self.audio = audio
-
-    async def process_text_to_audio(self):
-        for speakattempt in range(3):
-            try:
-                await self.stream_tts()
-                return  # Falls erfolgreich, direkt rausgehen
-            except Exception as e:
-                print(f"Attempt {speakattempt + 1}/3 failed with '{self.text}' in run_edgespeak with error: {e}")
-                await asyncio.sleep(3)
-
-        print(f"Giving up on sentence '{self.text}' after 3 attempts.")
-        self.audio = None
-
-    async def stream_tts(self):
-        communicate = edge_tts.Communicate(self.text, self.speaker)
-        stream = io.BytesIO()
-
-        async for chunk in communicate.stream():
-            if isinstance(chunk, dict):
-                if chunk.get("type") == "audio":  # Keep only audio chunks
-                    stream.write(chunk["data"])  # Extract audio data
-            else:
-                if isinstance(chunk, bytes):
-                    stream.write(chunk)
-
-        stream.seek(0)  # Reset pointer to the beginning
-        self.audio = AudioSegment.from_file(stream, format="mp3")
-
-    def clean_up(self):
-        self.audio = None
 
 
 def fix_sentence_text(text):
@@ -100,29 +65,67 @@ class Paragraph:
         if not self.sentences:
             self.break_text_into_sentences()
 
-        semaphore = asyncio.Semaphore(AMOUNT_PARALLEL_SENTENCE_TASKS)
+        audio, word_boundaries = await self.stream_tts()
 
-        async def process_sentence(sentence):
-            async with semaphore:
-                await sentence.process_text_to_audio()
-
-        await asyncio.gather(*(process_sentence(s) for s in self.sentences))
-
-        self.audio = AudioSegment.empty()
-
-        first = True
-        for s in self.sentences:
-            if s.audio:
-                if not first:
-                    self.audio += self.sentence_silence
-                self.audio += s.audio
-                first = False
+        self.audio = self.cut_audio(audio, word_boundaries)
 
         self.audio.export(os.path.join(cache_folder_path, self.filename), format='flac')
 
+    async def stream_tts(self):
+        communicate = edge_tts.Communicate(self.text, self.speaker)
+        stream = io.BytesIO()
+        word_boundaries = []
+
+        async for chunk in communicate.stream():
+            if isinstance(chunk, dict) and chunk.get("type") == "WordBoundary":
+                word_boundaries.append(chunk)
+            elif isinstance(chunk, bytes) or (isinstance(chunk, dict) and chunk.get("type") == "audio"):
+                stream.write(chunk.get("data", b""))  # Avoids errors if "data" key is missing
+
+        stream.seek(0)  # Reset pointer to the beginning
+        return AudioSegment.from_file(stream, format="mp3"), word_boundaries
+
+    def cut_audio(self, audio, words):
+        if not self.sentences or not words:
+            return audio  # Handle empty input safely
+
+        indices = []
+        index = 0
+
+        def contains_alnum(x):
+            return any(char.isalnum() for char in x)
+
+        for sentence in self.sentences:
+            words_in_sentence = list(filter(contains_alnum, sentence.text.split()))
+            amount_words = len(words_in_sentence)
+            index += amount_words
+            indices.append(index)
+            index += 1  # Account for spacing
+
+        if len(indices) <= 1:
+            return audio  # No need to split if there's only one sentence or none
+
+        indices.pop(-1)  # Remove last index to avoid out-of-bounds errors
+
+        split_ranges = [(0, words[indices[0]]['offset'] + words[indices[0]]['duration'])]
+
+        for j in range(1, len(indices)):
+            if indices[j - 1] + 1 >= len(words) or indices[j] >= len(words):
+                continue  # Avoid accessing invalid indexes
+
+            offset_start = words[indices[j - 1] + 1]['offset']
+            sentence_end = words[indices[j]]['offset']  + words[indices[j]]['duration']
+            split_ranges.append((offset_start, sentence_end))
+
+        new_audio = AudioSegment.empty()
+        silence = self.sentence_silence
+
+        for x, y in split_ranges:
+            new_audio += audio[x:y] + silence  # Silence naturally avoids being added at the end
+
+        return new_audio
+
     def clean_up(self):
-        for s in self.sentences:
-            s.clean_up()
         self.audio = None
         if check_cache_file_exists_and_is_not_empty(self.filename):
             os.remove(os.path.join(cache_folder_path, self.filename))
@@ -209,16 +212,8 @@ def build_sentences_from_line(line_striped, new_paragraph):
     if len(strings) == 0:
         return
 
-    current_combined = strings[0]
-
-    for i in range(1, len(strings)):
-        if len(current_combined.split()) > MAX_WORDS_FOR_TTS:
-            new_paragraph.sentences.append(Sentence(fix_sentence_text(current_combined), new_paragraph))
-            current_combined = strings[i]
-        else:
-            current_combined = current_combined + " " + strings[i]
-
-    new_paragraph.sentences.append(Sentence(fix_sentence_text(current_combined), new_paragraph))
+    for s in strings:
+        new_paragraph.sentences.append(Sentence(fix_sentence_text(s), new_paragraph))
 
 
 class Book:
