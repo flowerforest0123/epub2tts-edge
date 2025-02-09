@@ -9,3 +9,5 @@ pydub
 setuptools
 tqdm
 ffmpeg-python
+certifi
+aiohttp

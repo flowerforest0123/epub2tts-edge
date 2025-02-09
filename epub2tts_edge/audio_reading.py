@@ -7,7 +7,6 @@ import ssl
 from pathlib import Path
 
 import certifi
-import edge_tts
 from nltk import sent_tokenize
 from pydub import AudioSegment
 from tqdm.asyncio import tqdm
@@ -242,14 +241,17 @@ class Book:
         with open(self.filename_text, "r", encoding="utf-8") as file:
             current_chapter = None
             i = 0
+            check_for_header = True
             for line in file:
-                if i < 2:
+                if i < 2 and check_for_header:
                     i += 1
                     if line.startswith('Title: '):
                         self.title = line.replace('Title: ', '').strip()
+                        continue
                     elif line.startswith('Author: '):
                         self.author = line.replace('Author: ', '').strip()
-                    continue
+                        continue
+                    check_for_header = False
 
                 line_striped = line.strip()
                 if line_striped == "":
