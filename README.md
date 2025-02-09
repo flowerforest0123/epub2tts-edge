@@ -84,8 +84,10 @@ This installation requires Python < 3.12 and [Homebrew](https://brew.sh/) (I use
 #install dependencies
 brew install espeak pyenv ffmpeg
 #install epub2tts-edge
-git clone https://github.com/aedocw/epub2tts-edge
+git clone https://github.com/flowerforest0123/epub2tts-edge
 cd epub2tts-edge
+git fetch
+git checkout -b structure_code_better_communicate origin/structure_code_better_communicate
 pyenv install 3.11
 pyenv local 3.11
 #OPTIONAL - install this in a virtual environment
@@ -144,6 +146,8 @@ git clone https://github.com/aedocw/epub2tts-edge
 Set powershell directory to your cloned repo:
 ```
 cd C:\epub2tts-edge
+git fetch
+git checkout -b structure_code_better_communicate origin/structure_code_better_communicate
 ```
 Create virtual environment inside the directory:
 ```

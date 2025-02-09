@@ -3,12 +3,16 @@ import hashlib
 import io
 import os
 import re
+import ssl
 from pathlib import Path
 
+import certifi
 import edge_tts
 from nltk import sent_tokenize
 from pydub import AudioSegment
 from tqdm.asyncio import tqdm
+
+import reusable_communicate
 
 AMOUNT_PARALLEL_SENTENCE_TASKS = 10
 AMOUNT_PARALLEL_PARAGRAPH_TASKS = 2
@@ -44,7 +48,7 @@ class Sentence:
         self.audio = None
 
     async def stream_tts(self):
-        communicate = edge_tts.Communicate(self.text, self.speaker)
+        communicate = reusable_communicate.ReusableCommunicate(self.text, self.speaker, self.paragraph.chapter.book.ssl_context)
         stream = io.BytesIO()
 
         async for chunk in communicate.stream():
@@ -232,6 +236,7 @@ class Book:
         self.paragraph_silence_length = paragraph_silence_length
         self.sentence_silence_length = sentence_silence_length
         self.speaker = speaker
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     def read_text_into_chapters(self):
         with open(self.filename_text, "r", encoding="utf-8") as file:
