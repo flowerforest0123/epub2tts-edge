@@ -3,6 +3,7 @@ import hashlib
 import io
 import os
 import re
+import ssl
 from pathlib import Path
 
 import edge_tts
@@ -98,7 +99,7 @@ class Paragraph:
         for sentence in self.sentences:
             words_in_sentence = list(filter(contains_alnum, sentence.text.split()))
             amount_words = len(words_in_sentence)
-            index += amount_words
+            index += amount_words - 1
             indices.append(index)
             index += 1  # Account for spacing
 
@@ -107,21 +108,25 @@ class Paragraph:
 
         indices.pop(-1)  # Remove last index to avoid out-of-bounds errors
 
-        split_ranges = [(0, words[indices[0]]['offset'] + words[indices[0]]['duration'])]
+        split_ranges = [(0, round((words[indices[0]]['offset'] + words[indices[0]]['duration'])/10000))]
 
         for j in range(1, len(indices)):
             if indices[j - 1] + 1 >= len(words) or indices[j] >= len(words):
                 continue  # Avoid accessing invalid indexes
 
             offset_start = words[indices[j - 1] + 1]['offset']
-            sentence_end = words[indices[j]]['offset']  + words[indices[j]]['duration']
+            sentence_end = round((words[indices[j]]['offset']  + words[indices[j]]['duration'])/10000)
             split_ranges.append((offset_start, sentence_end))
+
+        split_ranges.append((round(words[indices[-1]+1]['offset']/10000), -1))
 
         new_audio = AudioSegment.empty()
         silence = self.sentence_silence
 
-        for x, y in split_ranges:
-            new_audio += audio[x:y] + silence  # Silence naturally avoids being added at the end
+        for i, (x, y) in enumerate(split_ranges):
+            new_audio += audio[x:y]
+            if i < len(split_ranges) - 1:
+                new_audio += silence
 
         return new_audio
 
@@ -235,11 +240,13 @@ class Book:
             for line in file:
                 if i < 2:
                     i += 1
+                    #TODO Ignore condition if first line didnt contain
                     if line.startswith('Title: '):
                         self.title = line.replace('Title: ', '').strip()
+                        continue
                     elif line.startswith('Author: '):
                         self.author = line.replace('Author: ', '').strip()
-                    continue
+                        continue
 
                 line_striped = line.strip()
                 if line_striped == "":
