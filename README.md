@@ -107,6 +107,8 @@ sudo apt install espeak-ng ffmpeg python3-venv
 #clone the repo
 git clone https://github.com/aedocw/epub2tts-edge
 cd epub2tts-edge
+git fetch
+git checkout -b structure_code_better_communicate origin/structure_code_better_communicate
 #OPTIONAL - install this in a virtual environment
 python3 -m venv .venv && source .venv/bin/activate
 pip install .
