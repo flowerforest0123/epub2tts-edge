@@ -105,7 +105,7 @@ These instructions are for Ubuntu 24.04.1 LTS and 22.04  (20.04 showed some depe
 #install dependencies
 sudo apt install espeak-ng ffmpeg python3-venv
 #clone the repo
-git clone https://github.com/aedocw/epub2tts-edge
+git clone https://github.com/flowerforest0123/epub2tts-edge
 cd epub2tts-edge
 git fetch
 git checkout -b structure_code_better_communicate origin/structure_code_better_communicate
@@ -143,7 +143,7 @@ pip install virtualenv
 ```
 Clone the repo to your desired directory, i'll use 'C:\epub2tts-edge' as an example:
 ```
-git clone https://github.com/aedocw/epub2tts-edge
+git clone https://github.com/flowerforest0123/epub2tts-edge
 ```
 Set powershell directory to your cloned repo:
 ```
